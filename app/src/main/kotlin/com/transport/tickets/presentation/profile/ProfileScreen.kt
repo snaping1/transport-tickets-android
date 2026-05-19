@@ -1,16 +1,17 @@
 package com.transport.tickets.presentation.profile
 
-import android.graphics.Bitmap
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -23,8 +24,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -32,1135 +31,838 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
 import androidx.hilt.navigation.compose.hiltViewModel
 import coil.compose.AsyncImage
-import com.google.zxing.BarcodeFormat
-import com.google.zxing.EncodeHintType
-import com.google.zxing.qrcode.QRCodeWriter
 import com.transport.tickets.domain.model.Passenger
-import com.transport.tickets.domain.model.Ticket
-import com.transport.tickets.presentation.routes.transportIcon
-import com.transport.tickets.presentation.tickets.MyTicketsUiState
-import com.transport.tickets.presentation.tickets.MyTicketsViewModel
-import java.time.Instant
-import java.time.ZoneId
-import java.time.format.DateTimeFormatter
-import java.util.Locale
 import com.transport.tickets.presentation.util.DateVisualTransformation
 import com.transport.tickets.presentation.util.PhoneVisualTransformation
 import com.transport.tickets.presentation.util.extractDateDigits
 import com.transport.tickets.presentation.util.extractPhoneDigits
+import java.time.Instant
+import java.time.ZoneId
+import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+private fun fmtPhone(d: String) = buildString {
+    if (d.isEmpty()) return ""
+    append("+7")
+    if (d.isNotEmpty()) append(" (${d.take(3)}")
+    if (d.length >= 3) append(") ${d.substring(3, minOf(6, d.length))}")
+    if (d.length > 6) append("-${d.substring(6, minOf(8, d.length))}")
+    if (d.length > 8) append("-${d.substring(8)}")
+}
+
+private fun fmtDate(d: String) = buildString {
+    val s = d.filter { it.isDigit() }
+    if (s.length >= 2) append("${s.take(2)}.") else { append(s); return@buildString }
+    if (s.length >= 4) append("${s.substring(2, 4)}.") else { append(s.drop(2)); return@buildString }
+    append(s.drop(4))
+}
+
+private fun fmtPassport(raw: String): String {
+    val d = raw.filter { it.isDigit() }.take(10)
+    return if (d.length >= 4) "${d.take(4)} ${d.drop(4)}" else d
+}
+
+private enum class EditField { Name, Phone, BirthDate, Passport }
+
+// ─── Main Screen ─────────────────────────────────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun ProfileScreen(
     onSignOut: () -> Unit,
     onBack: () -> Unit,
-    onNavigateToSearch: () -> Unit,
+    onNavigateToSearch: () -> Unit = {},
     onTicketClick: (Int) -> Unit = {},
-    viewModel: ProfileViewModel = hiltViewModel(),
-    ticketsViewModel: MyTicketsViewModel = hiltViewModel()
+    showBackButton: Boolean = true,
+    viewModel: ProfileViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
-    val ticketsState by ticketsViewModel.uiState.collectAsState()
-    var selectedTab by remember { mutableIntStateOf(0) }
-    var qrTicket by remember { mutableStateOf<Ticket?>(null) }
-    var ticketToCancel by remember { mutableStateOf<Ticket?>(null) }
-    var showSignOutConfirm by remember { mutableStateOf(false) }
-
     val context = LocalContext.current
+    val snackbarHostState = remember { SnackbarHostState() }
+    val scope = rememberCoroutineScope()
+
+    var showSignOut by remember { mutableStateOf(false) }
+    var showAddCard by remember { mutableStateOf(false) }
+    var editField by remember { mutableStateOf<EditField?>(null) }
+    var editPassenger by remember { mutableStateOf<Passenger?>(null) }
+    var showAddPassenger by remember { mutableStateOf(false) }
+    var deletePassenger by remember { mutableStateOf<Passenger?>(null) }
+
     val avatarLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         uri?.let {
-            try {
-                context.contentResolver.takePersistableUriPermission(it, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            } catch (_: Exception) {}
+            try { context.contentResolver.takePersistableUriPermission(it, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            catch (_: Exception) {}
             viewModel.setAvatarUri(it.toString())
         }
     }
 
-    qrTicket?.let { ticket ->
-        QrDialog(ticket = ticket, onDismiss = { qrTicket = null })
+    // Snackbar on cache clear
+    LaunchedEffect(uiState.cacheCleared) {
+        if (uiState.cacheCleared) {
+            snackbarHostState.showSnackbar("Кэш успешно очищен")
+            viewModel.resetCacheClearedState()
+        }
     }
 
-    ticketToCancel?.let { ticket ->
-        AlertDialog(
-            onDismissRequest = { ticketToCancel = null },
-            title = { Text("Отмена билета") },
-            text = { Text("Отменить билет? Средства будут возвращены.") },
-            confirmButton = {
-                Button(onClick = { ticketsViewModel.cancelTicket(ticket.id); ticketToCancel = null }) {
-                    Text("Отменить билет")
-                }
-            },
-            dismissButton = {
-                OutlinedButton(onClick = { ticketToCancel = null }) { Text("Нет") }
-            }
+    // ─ Dialogs ─
+    if (showSignOut) AlertDialog(
+        onDismissRequest = { showSignOut = false },
+        title = { Text("Выйти из аккаунта?") },
+        confirmButton = {
+            Button(onClick = { viewModel.signOut(); onSignOut(); showSignOut = false },
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("Выйти") }
+        },
+        dismissButton = { OutlinedButton(onClick = { showSignOut = false }) { Text("Отмена") } }
+    )
+
+    if (uiState.showClearCacheConfirm) AlertDialog(
+        onDismissRequest = viewModel::dismissClearCache,
+        title = { Text("Очистить кэш?") },
+        text = { Text("Данные маршрутов и билетов будут удалены.") },
+        confirmButton = {
+            Button(onClick = viewModel::clearCache,
+                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("Очистить") }
+        },
+        dismissButton = { OutlinedButton(onClick = viewModel::dismissClearCache) { Text("Отмена") } }
+    )
+
+    editField?.let { field ->
+        EditFieldDialog(field = field, state = uiState, viewModel = viewModel, onDismiss = { editField = null; viewModel.resetSaveState() })
+    }
+
+    if (showAddPassenger) PassengerEditDialog(
+        passenger = Passenger(),
+        title = "Добавить пассажира",
+        onDismiss = { showAddPassenger = false },
+        onSave = { p -> viewModel.updatePassenger(p); showAddPassenger = false }
+    )
+
+    editPassenger?.let { p ->
+        PassengerEditDialog(
+            passenger = p,
+            title = "Изменить пассажира",
+            onDismiss = { editPassenger = null },
+            onSave = { updated -> viewModel.updatePassenger(updated); editPassenger = null }
         )
     }
 
-    if (showSignOutConfirm) {
+    deletePassenger?.let { p ->
         AlertDialog(
-            onDismissRequest = { showSignOutConfirm = false },
-            title = { Text("Выйти из аккаунта?") },
-            text = { Text("Вы уверены, что хотите выйти из аккаунта?") },
+            onDismissRequest = { deletePassenger = null },
+            title = { Text("Удалить пассажира?") },
+            text = { Text(p.fullName) },
             confirmButton = {
-                Button(
-                    onClick = { viewModel.signOut(); onSignOut(); showSignOutConfirm = false },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                ) { Text("Выйти") }
+                Button(onClick = { viewModel.deletePassenger(p); deletePassenger = null },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("Удалить") }
             },
-            dismissButton = {
-                OutlinedButton(onClick = { showSignOutConfirm = false }) { Text("Отмена") }
-            }
+            dismissButton = { OutlinedButton(onClick = { deletePassenger = null }) { Text("Отмена") } }
         )
     }
 
-    if (uiState.passwordResetSent) {
-        AlertDialog(
-            onDismissRequest = viewModel::resetPasswordResetState,
-            title = { Text("Письмо отправлено") },
-            text = { Text("Проверьте почту ${uiState.profile.email} для сброса пароля.") },
-            confirmButton = { TextButton(onClick = viewModel::resetPasswordResetState) { Text("OK") } }
-        )
-    }
-    if (uiState.showClearCacheConfirm) {
-        AlertDialog(
-            onDismissRequest = viewModel::dismissClearCache,
-            title = { Text("Очистить кэш?") },
-            text = { Text("Данные маршрутов и билетов будут удалены из локального хранилища.") },
-            confirmButton = {
-                Button(
-                    onClick = viewModel::clearCache,
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                ) { Text("Очистить") }
-            },
-            dismissButton = { OutlinedButton(onClick = viewModel::dismissClearCache) { Text("Отмена") } }
-        )
-    }
+    if (showAddCard) AddCardDialog(
+        onDismiss = { showAddCard = false },
+        onAdd = { card -> viewModel.addPaymentCard(card); showAddCard = false }
+    )
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Личный кабинет") },
+                title = { Text("Профиль") },
                 navigationIcon = {
-                    IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Назад") }
+                    if (showBackButton) IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Назад") }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0f)
-                )
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
             )
-        }
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
-        Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-            // ─── Hero Header ───
-            HeroHeader(
-                state = uiState,
-                onAvatarClick = { avatarLauncher.launch("image/*") }
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            HeroSection(state = uiState, onAvatarClick = { avatarLauncher.launch("image/*") })
+
+            PersonalDataCard(state = uiState, onEdit = { editField = it })
+
+            PassengersCard(
+                passengers = uiState.savedPassengers,
+                onAdd = { showAddPassenger = true },
+                onEdit = { editPassenger = it },
+                onDelete = { deletePassenger = it }
             )
 
-            // ─── Stats Row ───
-            StatsRow(
-                tickets = ticketsState.tickets,
-                passengersCount = uiState.savedPassengers.size
+            PaymentCard(
+                cards = uiState.paymentCards,
+                onAdd = { showAddCard = true },
+                onRemove = viewModel::removePaymentCard
             )
 
-            // ─── Tab Row ───
-            TabRow(
-                selectedTabIndex = selectedTab,
-                containerColor = MaterialTheme.colorScheme.surface
-            ) {
-                Tab(
-                    selected = selectedTab == 0, onClick = { selectedTab = 0 },
-                    text = { Text("Билеты") },
-                    icon = { Icon(Icons.Default.ConfirmationNumber, null, Modifier.size(18.dp)) }
-                )
-                Tab(
-                    selected = selectedTab == 1, onClick = { selectedTab = 1 },
-                    text = { Text("Профиль") },
-                    icon = { Icon(Icons.Default.Person, null, Modifier.size(18.dp)) }
-                )
-                Tab(
-                    selected = selectedTab == 2, onClick = { selectedTab = 2 },
-                    text = { Text("Настройки") },
-                    icon = { Icon(Icons.Default.Settings, null, Modifier.size(18.dp)) }
-                )
-            }
+            SettingsCard(state = uiState, viewModel = viewModel)
 
-            // ─── Tab Content ───
-            Box(modifier = Modifier.weight(1f)) {
-                when (selectedTab) {
-                    0 -> TicketsTab(
-                        state = ticketsState,
-                        onRefresh = ticketsViewModel::refresh,
-                        onCancelClick = { ticketToCancel = it },
-                        onQrClick = { qrTicket = it },
-                        onTicketClick = onTicketClick,
-                        onNavigateToSearch = onNavigateToSearch
-                    )
-                    1 -> ProfileTab(
-                        state = uiState,
-                        viewModel = viewModel,
-                        onSignOut = { showSignOutConfirm = true }
-                    )
-                    2 -> SettingsTab(state = uiState, viewModel = viewModel)
-                }
-            }
+            AccountCard(state = uiState, viewModel = viewModel, onSignOut = { showSignOut = true })
+
+            Spacer(Modifier.height(8.dp))
         }
     }
 }
 
-// ─── HERO HEADER ─────────────────────────────────────────────────────────────
+// ─── Hero ────────────────────────────────────────────────────────────────────
 
 @Composable
-private fun HeroHeader(state: ProfileUiState, onAvatarClick: () -> Unit) {
-    val primary = MaterialTheme.colorScheme.primary
-    val primaryContainer = MaterialTheme.colorScheme.primaryContainer
-    val surface = MaterialTheme.colorScheme.surface
-
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(
-                Brush.verticalGradient(
-                    colors = listOf(primaryContainer.copy(alpha = 0.8f), surface)
-                )
-            )
-            .padding(horizontal = 24.dp, vertical = 20.dp)
+private fun HeroSection(state: ProfileUiState, onAvatarClick: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f))
     ) {
         Row(
+            modifier = Modifier.padding(20.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Avatar
             Box(contentAlignment = Alignment.BottomEnd) {
                 if (state.avatarUri != null) {
                     AsyncImage(
-                        model = state.avatarUri,
-                        contentDescription = "Аватар",
+                        model = state.avatarUri, contentDescription = null,
                         contentScale = ContentScale.Crop,
-                        modifier = Modifier
-                            .size(80.dp)
-                            .clip(CircleShape)
-                            .border(2.dp, primary, CircleShape)
+                        modifier = Modifier.size(72.dp).clip(CircleShape)
+                            .border(2.dp, MaterialTheme.colorScheme.primary, CircleShape)
                             .clickable(onClick = onAvatarClick)
                     )
                 } else {
-                    val initials = state.profile.displayName
-                        .split(" ")
-                        .filter { it.isNotEmpty() }
-                        .take(2)
-                        .joinToString("") { it.first().uppercase() }
+                    val initials = state.profile.displayName.split(" ").filter { it.isNotEmpty() }
+                        .take(2).joinToString("") { it.first().uppercase() }
                         .ifEmpty { state.profile.email.firstOrNull()?.uppercase() ?: "?" }
-
                     Box(
-                        modifier = Modifier
-                            .size(80.dp)
-                            .clip(CircleShape)
-                            .background(primary)
+                        Modifier.size(72.dp).clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary)
                             .clickable(onClick = onAvatarClick),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text(
-                            initials,
-                            style = MaterialTheme.typography.headlineMedium,
-                            color = MaterialTheme.colorScheme.onPrimary,
-                            fontWeight = FontWeight.Bold
-                        )
+                        Text(initials, style = MaterialTheme.typography.titleLarge,
+                            color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.Bold)
                     }
                 }
                 SmallFloatingActionButton(
                     onClick = onAvatarClick,
-                    modifier = Modifier.size(26.dp),
+                    modifier = Modifier.size(24.dp),
                     containerColor = MaterialTheme.colorScheme.secondary
                 ) {
-                    Icon(
-                        Icons.Default.CameraAlt, null,
-                        Modifier.size(13.dp),
-                        tint = MaterialTheme.colorScheme.onSecondary
-                    )
+                    Icon(Icons.Default.CameraAlt, null, Modifier.size(12.dp), tint = MaterialTheme.colorScheme.onSecondary)
                 }
             }
-
-            // Name + email
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(
-                    text = state.profile.displayName.ifEmpty { "Пользователь" },
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                if (state.profile.email.isNotEmpty()) {
-                    Text(
-                        text = state.profile.email,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                if (state.profile.phone.isNotEmpty()) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.Phone, null,
-                            Modifier.size(12.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            state.profile.phone,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                Text(state.profile.displayName.ifEmpty { "Пользователь" },
+                    style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                if (state.profile.email.isNotEmpty())
+                    Text(state.profile.email, style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (state.profile.registeredAt > 0) {
+                    val year = remember(state.profile.registeredAt) {
+                        Instant.ofEpochMilli(state.profile.registeredAt).atZone(ZoneId.systemDefault()).year
                     }
+                    Text("С нами с $year", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
     }
 }
 
-// ─── STATS ROW ───────────────────────────────────────────────────────────────
+// ─── Личные данные ───────────────────────────────────────────────────────────
 
 @Composable
-private fun StatsRow(tickets: List<Ticket>, passengersCount: Int) {
-    val activeCount = tickets.count { it.status == "active" }
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        StatCard(
-            modifier = Modifier.weight(1f),
-            icon = Icons.Default.ConfirmationNumber,
-            value = tickets.size.toString(),
-            label = "Поездок"
+private fun PersonalDataCard(state: ProfileUiState, onEdit: (EditField) -> Unit) {
+    ProfileCard(title = "Личные данные", icon = Icons.Default.Person) {
+        FieldRow(
+            icon = Icons.Default.Badge,
+            label = "ФИО",
+            value = state.editName,
+            hint = "Не указано",
+            onClick = { onEdit(EditField.Name) }
         )
-        StatCard(
-            modifier = Modifier.weight(1f),
-            icon = Icons.Default.CheckCircle,
-            value = activeCount.toString(),
-            label = "Активных"
+        HorizontalDivider()
+        FieldRow(
+            icon = Icons.Default.Phone,
+            label = "Телефон",
+            value = fmtPhone(state.editPhone),
+            hint = "Не указан",
+            onClick = { onEdit(EditField.Phone) }
         )
-        StatCard(
-            modifier = Modifier.weight(1f),
-            icon = Icons.Default.People,
-            value = passengersCount.toString(),
-            label = "Пассажиров"
+        HorizontalDivider()
+        FieldRow(
+            icon = Icons.Default.CalendarMonth,
+            label = "Дата рождения",
+            value = fmtDate(state.editBirthDate),
+            hint = "Не указана",
+            onClick = { onEdit(EditField.BirthDate) }
+        )
+        HorizontalDivider()
+        FieldRow(
+            icon = Icons.Default.CreditCard,
+            label = "Паспорт",
+            value = fmtPassport(state.editPassport),
+            hint = "Не указан",
+            onClick = { onEdit(EditField.Passport) }
         )
     }
 }
 
 @Composable
-private fun StatCard(
-    modifier: Modifier,
-    icon: ImageVector,
-    value: String,
-    label: String
-) {
-    Card(
-        modifier = modifier,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+private fun FieldRow(icon: ImageVector, label: String, value: String, hint: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Column(
-            modifier = Modifier.padding(10.dp).fillMaxWidth(),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(3.dp)
-        ) {
-            Icon(icon, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
-            Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Icon(icon, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+            Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(
-                label,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center
+                value.ifEmpty { hint },
+                style = MaterialTheme.typography.bodyLarge,
+                color = if (value.isEmpty()) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                        else MaterialTheme.colorScheme.onSurface
             )
         }
+        Icon(Icons.Default.Edit, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
-// ─── ВКЛАДКА: БИЛЕТЫ ─────────────────────────────────────────────────────────
+// ─── Диалог редактирования поля ──────────────────────────────────────────────
 
 @Composable
-private fun TicketsTab(
-    state: MyTicketsUiState,
-    onRefresh: () -> Unit,
-    onCancelClick: (Ticket) -> Unit,
-    onQrClick: (Ticket) -> Unit,
-    onTicketClick: (Int) -> Unit,
-    onNavigateToSearch: () -> Unit
-) {
-    val fmt = remember {
-        DateTimeFormatter.ofPattern("dd MMM yyyy, HH:mm", Locale("ru")).withZone(ZoneId.systemDefault())
-    }
-    val sortedTickets = remember(state.tickets) {
-        state.tickets.sortedWith(
-            compareByDescending<Ticket> { it.status == "active" }.thenByDescending { it.createdAt }
-        )
-    }
-
-    Box(modifier = Modifier.fillMaxSize()) {
-        if (!state.isLoading && sortedTickets.isEmpty()) {
-            Column(
-                modifier = Modifier.fillMaxSize(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
+private fun EditFieldDialog(field: EditField, state: ProfileUiState, viewModel: ProfileViewModel, onDismiss: () -> Unit) {
+    when (field) {
+        EditField.Name -> {
+            var value by remember { mutableStateOf(state.editName) }
+            SimpleEditDialog(
+                title = "ФИО",
+                onDismiss = onDismiss,
+                onConfirm = { viewModel.setEditName(value.trim()); viewModel.saveProfile(); onDismiss() }
             ) {
-                Icon(
-                    Icons.Default.ConfirmationNumber, null,
-                    Modifier.size(72.dp),
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                )
-                Spacer(Modifier.height(16.dp))
-                Text(
-                    "У вас пока нет билетов",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "Найдите маршрут и купите первый билет",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(horizontal = 32.dp)
-                )
-                Spacer(Modifier.height(24.dp))
-                Button(onClick = onNavigateToSearch) { Text("Найти маршрут") }
-            }
-        } else {
-            LazyColumn(
-                contentPadding = PaddingValues(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                items(sortedTickets, key = { it.id }) { ticket ->
-                    TicketCard(
-                        ticket = ticket,
-                        isCancelling = state.cancellingTicketId == ticket.id,
-                        fmt = fmt,
-                        onCancelClick = { onCancelClick(ticket) },
-                        onQrClick = { onQrClick(ticket) },
-                        onTicketClick = { onTicketClick(ticket.id) }
-                    )
-                }
+                OutlinedTextField(value = value, onValueChange = { value = it },
+                    label = { Text("Фамилия Имя Отчество") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    leadingIcon = { Icon(Icons.Default.Badge, null, Modifier.size(18.dp)) })
             }
         }
-        if (state.isLoading) {
-            LinearProgressIndicator(modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter))
+        EditField.Phone -> {
+            var raw by remember { mutableStateOf(extractPhoneDigits(state.editPhone)) }
+            SimpleEditDialog(
+                title = "Телефон",
+                onDismiss = onDismiss,
+                onConfirm = { viewModel.setEditPhone(raw); viewModel.saveProfile(); onDismiss() }
+            ) {
+                OutlinedTextField(
+                    value = raw,
+                    onValueChange = { raw = extractPhoneDigits(it) },
+                    label = { Text("Номер телефона") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("+7 (___) ___-__-__") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                    visualTransformation = PhoneVisualTransformation,
+                    leadingIcon = { Icon(Icons.Default.Phone, null, Modifier.size(18.dp)) }
+                )
+            }
         }
-    }
-}
-
-@Composable
-private fun TicketCard(
-    ticket: Ticket,
-    isCancelling: Boolean,
-    fmt: DateTimeFormatter,
-    onCancelClick: () -> Unit,
-    onQrClick: () -> Unit,
-    onTicketClick: () -> Unit
-) {
-    val isActive = ticket.status == "active"
-    val isUsed = ticket.route?.let {
-        runCatching { Instant.parse(it.departureTime).isBefore(Instant.now()) }.getOrDefault(false)
-    } ?: false
-
-    val statusText = when {
-        ticket.status == "cancelled" -> "Отменён"
-        isUsed -> "Использован"
-        else -> "Активен"
-    }
-    val statusBg = when {
-        ticket.status == "cancelled" -> MaterialTheme.colorScheme.errorContainer
-        isUsed -> MaterialTheme.colorScheme.surfaceVariant
-        else -> MaterialTheme.colorScheme.primaryContainer
-    }
-    val statusFg = when {
-        ticket.status == "cancelled" -> MaterialTheme.colorScheme.onErrorContainer
-        isUsed -> MaterialTheme.colorScheme.onSurfaceVariant
-        else -> MaterialTheme.colorScheme.onPrimaryContainer
-    }
-
-    val departureStr = ticket.route?.let { runCatching { fmt.format(Instant.parse(it.departureTime)) }.getOrNull() }
-    val arrivalStr = ticket.route?.let { runCatching { fmt.format(Instant.parse(it.arrivalTime)) }.getOrNull() }
-    val createdStr = runCatching { fmt.format(Instant.parse(ticket.createdAt)) }.getOrNull()
-
-    Card(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onTicketClick),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
-    ) {
-        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+        EditField.BirthDate -> {
+            var raw by remember { mutableStateOf(extractDateDigits(state.editBirthDate)) }
+            SimpleEditDialog(
+                title = "Дата рождения",
+                onDismiss = onDismiss,
+                onConfirm = { viewModel.setEditBirthDate(raw); viewModel.saveProfile(); onDismiss() }
             ) {
-                Text(
-                    text = ticket.route?.let { "${it.originCity} → ${it.destinationCity}" }
-                        ?: "Маршрут #${ticket.routeId}",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                Surface(shape = MaterialTheme.shapes.small, color = statusBg) {
-                    Text(
-                        statusText,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = statusFg
-                    )
-                }
-            }
-
-            ticket.route?.let { route ->
-                val (tIcon, tLabel) = transportIcon(route.transportType)
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Icon(tIcon, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
-                    Text(
-                        tLabel,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.Medium
-                    )
-                }
-            }
-
-            if (departureStr != null) {
-                Text("Отправление: $departureStr", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            if (arrivalStr != null) {
-                Text("Прибытие: $arrivalStr", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text("Мест: ${ticket.seatCount}", style = MaterialTheme.typography.bodyMedium)
-                    if (ticket.seatNumbers.isNotEmpty()) {
-                        Text(
-                            "Места: ${ticket.seatNumbers.sorted().joinToString(", ")}",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
-                }
-                Text(
-                    "${ticket.totalPrice.toInt()} ₽",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.primary
+                OutlinedTextField(
+                    value = raw,
+                    onValueChange = { raw = extractDateDigits(it) },
+                    label = { Text("Дата рождения") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("дд.мм.гггг") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    visualTransformation = DateVisualTransformation,
+                    leadingIcon = { Icon(Icons.Default.CalendarMonth, null, Modifier.size(18.dp)) }
                 )
             }
-
-            if (createdStr != null) {
+        }
+        EditField.Passport -> {
+            val passportDigits = remember { state.editPassport.filter { it.isDigit() } }
+            var series by remember { mutableStateOf(passportDigits.take(4)) }
+            var number by remember { mutableStateOf(passportDigits.drop(4).take(6)) }
+            val isValid = series.length == 4 && number.length == 6
+            SimpleEditDialog(
+                title = "Паспорт",
+                onDismiss = onDismiss,
+                confirmEnabled = isValid,
+                onConfirm = {
+                    viewModel.setEditPassport("$series $number")
+                    viewModel.saveProfile()
+                    onDismiss()
+                }
+            ) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = series,
+                        onValueChange = { if (it.all { c -> c.isDigit() } && it.length <= 4) series = it },
+                        label = { Text("Серия") },
+                        placeholder = { Text("1234") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                    )
+                    OutlinedTextField(
+                        value = number,
+                        onValueChange = { if (it.all { c -> c.isDigit() } && it.length <= 6) number = it },
+                        label = { Text("Номер") },
+                        placeholder = { Text("567890") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1.5f),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                    )
+                }
                 Text(
-                    "Куплен: $createdStr",
+                    "Паспорт РФ: 4 цифры серии и 6 цифр номера",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-
-            if (isActive) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = onCancelClick,
-                        enabled = !isCancelling,
-                        modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                    ) {
-                        if (isCancelling) {
-                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                        } else {
-                            Icon(Icons.Default.Cancel, null, Modifier.size(16.dp))
-                            Spacer(Modifier.width(4.dp))
-                            Text("Отменить")
-                        }
-                    }
-                    Button(onClick = onQrClick, modifier = Modifier.weight(1f)) {
-                        Icon(Icons.Default.QrCode, null, Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("QR-код")
-                    }
-                }
-            }
         }
     }
 }
 
-// ─── ВКЛАДКА: ПРОФИЛЬ ────────────────────────────────────────────────────────
-
 @Composable
-private fun ProfileTab(
-    state: ProfileUiState,
-    viewModel: ProfileViewModel,
-    onSignOut: () -> Unit
+private fun SimpleEditDialog(
+    title: String,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+    confirmEnabled: Boolean = true,
+    content: @Composable ColumnScope.() -> Unit
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                content()
+            }
+        },
+        confirmButton = { Button(onClick = onConfirm, enabled = confirmEnabled) { Text("Сохранить") } },
+        dismissButton = { OutlinedButton(onClick = onDismiss) { Text("Отмена") } }
+    )
+}
+
+// ─── Пассажиры ───────────────────────────────────────────────────────────────
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun PassengersCard(
+    passengers: List<Passenger>,
+    onAdd: () -> Unit,
+    onEdit: (Passenger) -> Unit,
+    onDelete: (Passenger) -> Unit
+) {
+    ProfileCard(
+        title = "Пассажиры",
+        icon = Icons.Default.People,
+        action = {
+            TextButton(onClick = onAdd) {
+                Icon(Icons.Default.Add, null, Modifier.size(16.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Добавить")
+            }
+        }
     ) {
-        // ─── Personal data card ───
-        Card(modifier = Modifier.fillMaxWidth()) {
+        if (passengers.isEmpty()) {
             Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Icon(Icons.Default.Person, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
-                    Text(
-                        "Личные данные",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-
-                HorizontalDivider()
-
-                OutlinedTextField(
-                    value = state.editName,
-                    onValueChange = viewModel::setEditName,
-                    label = { Text("ФИО") },
-                    modifier = Modifier.fillMaxWidth(),
-                    leadingIcon = { Icon(Icons.Default.Badge, null) },
-                    singleLine = true,
-                    shape = RoundedCornerShape(12.dp)
-                )
-
-                var phoneRaw by remember { mutableStateOf(extractPhoneDigits(state.editPhone)) }
-                var dateRaw by remember { mutableStateOf(extractDateDigits(state.editBirthDate)) }
-
-                LaunchedEffect(state.profile) {
-                    val newPhone = extractPhoneDigits(state.editPhone)
-                    val newDate = extractDateDigits(state.editBirthDate)
-                    if (phoneRaw.isEmpty() && newPhone.isNotEmpty()) phoneRaw = newPhone
-                    if (dateRaw.isEmpty() && newDate.isNotEmpty()) dateRaw = newDate
-                }
-
-                OutlinedTextField(
-                    value = phoneRaw,
-                    onValueChange = { input ->
-                        val raw = extractPhoneDigits(input)
-                        phoneRaw = raw
-                        viewModel.setEditPhone(raw)
-                    },
-                    label = { Text("Телефон") },
-                    modifier = Modifier.fillMaxWidth(),
-                    leadingIcon = { Icon(Icons.Default.Phone, null) },
-                    placeholder = { Text("+7 (___) ___-__-__") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                    visualTransformation = PhoneVisualTransformation,
-                    singleLine = true,
-                    shape = RoundedCornerShape(12.dp)
-                )
-
-                OutlinedTextField(
-                    value = dateRaw,
-                    onValueChange = { input ->
-                        val raw = extractDateDigits(input)
-                        dateRaw = raw
-                        viewModel.setEditBirthDate(raw)
-                    },
-                    label = { Text("Дата рождения") },
-                    modifier = Modifier.fillMaxWidth(),
-                    leadingIcon = { Icon(Icons.Default.CalendarMonth, null) },
-                    placeholder = { Text("дд.мм.гггг") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    visualTransformation = DateVisualTransformation,
-                    singleLine = true,
-                    shape = RoundedCornerShape(12.dp)
-                )
-
-                if (state.profileError != null) {
-                    Text(state.profileError, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-                }
-                if (state.profileSaved) {
-                    Text(
-                        "✓ Изменения сохранены",
-                        color = MaterialTheme.colorScheme.primary,
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-
-                Button(
-                    onClick = viewModel::saveProfile,
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = !state.profileSaving,
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    if (state.profileSaving) {
-                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
-                    } else {
-                        Icon(Icons.Default.Save, null, Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Сохранить изменения")
-                    }
-                }
+                Icon(Icons.Default.PersonAdd, null, Modifier.size(40.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f))
+                Text("Нет сохранённых пассажиров",
+                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
+                Text("Нажмите «Добавить» или купите билет",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(0.6f), textAlign = TextAlign.Center)
             }
-        }
-
-        // ─── Пассажиры ───
-        PassengersSection(
-            passengers = state.savedPassengers,
-            onDelete = viewModel::deletePassenger
-        )
-
-        // ─── Account actions card ───
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Icon(Icons.Default.ManageAccounts, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
-                    Text(
-                        "Аккаунт",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-
-                HorizontalDivider()
-
-                OutlinedButton(
-                    onClick = viewModel::sendPasswordReset,
-                    modifier = Modifier.fillMaxWidth(),
-                    enabled = !state.passwordResetLoading && state.profile.email.isNotEmpty(),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    if (state.passwordResetLoading) {
-                        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                    } else {
-                        Icon(Icons.Default.Lock, null, Modifier.size(16.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Сменить пароль")
-                    }
-                }
-
-                Button(
-                    onClick = onSignOut,
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.errorContainer,
-                        contentColor = MaterialTheme.colorScheme.onErrorContainer
-                    ),
-                    shape = RoundedCornerShape(12.dp)
-                ) {
-                    Icon(Icons.Default.Logout, null, Modifier.size(16.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("Выйти из аккаунта")
-                }
-            }
-        }
-
-        Spacer(Modifier.height(16.dp))
-    }
-}
-
-// ─── PASSENGERS SECTION ───────────────────────────────────────────────────────
-
-@Composable
-private fun PassengersSection(passengers: List<Passenger>, onDelete: (Passenger) -> Unit) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Icon(Icons.Default.People, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
-                    Text(
-                        "Мои пассажиры",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-                if (passengers.isNotEmpty()) {
-                    Surface(
-                        shape = RoundedCornerShape(50),
-                        color = MaterialTheme.colorScheme.primaryContainer
-                    ) {
-                        Text(
-                            passengers.size.toString(),
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-            }
-
-            HorizontalDivider()
-
-            if (passengers.isEmpty()) {
-                Column(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 20.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Icon(
-                        Icons.Default.PersonAdd, null,
-                        Modifier.size(48.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-                    )
-                    Text(
-                        "Нет сохранённых пассажиров",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontWeight = FontWeight.Medium
-                    )
-                    Text(
-                        "Пассажиры появятся здесь\nпосле покупки билетов",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                        textAlign = TextAlign.Center
-                    )
-                }
-            } else {
-                passengers.forEach { passenger ->
-                    PassengerCard(passenger = passenger, onDelete = { onDelete(passenger) })
-                }
+        } else {
+            passengers.forEach { passenger ->
+                PassengerMiniCard(
+                    passenger = passenger,
+                    onClick = { onEdit(passenger) },
+                    onLongClick = { onDelete(passenger) }
+                )
+                Spacer(Modifier.height(6.dp))
             }
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun PassengerCard(passenger: Passenger, onDelete: () -> Unit) {
-    var showDeleteConfirm by remember { mutableStateOf(false) }
-
-    if (showDeleteConfirm) {
-        AlertDialog(
-            onDismissRequest = { showDeleteConfirm = false },
-            title = { Text("Удалить пассажира?") },
-            text = { Text("Удалить ${passenger.fullName} из списка?") },
-            confirmButton = {
-                Button(
-                    onClick = { onDelete(); showDeleteConfirm = false },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                ) { Text("Удалить") }
-            },
-            dismissButton = {
-                OutlinedButton(onClick = { showDeleteConfirm = false }) { Text("Отмена") }
-            }
-        )
-    }
-
+private fun PassengerMiniCard(passenger: Passenger, onClick: () -> Unit, onLongClick: () -> Unit) {
     Surface(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = onLongClick),
         shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+        tonalElevation = 1.dp
     ) {
         Row(
             modifier = Modifier.padding(12.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // Avatar with initial
             Box(
-                modifier = Modifier
-                    .size(44.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.secondaryContainer),
+                Modifier.size(40.dp).clip(CircleShape).background(MaterialTheme.colorScheme.secondaryContainer),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
                     passenger.lastName.firstOrNull()?.uppercase() ?: "?",
-                    style = MaterialTheme.typography.titleMedium,
+                    style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.onSecondaryContainer,
                     fontWeight = FontWeight.Bold
                 )
             }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(passenger.fullName, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium, maxLines = 1)
+                Text("${passenger.documentLabel}: ${passenger.documentFull}",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
 
-            // Name + document
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(
-                    passenger.fullName,
-                    style = MaterialTheme.typography.bodyLarge,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1
-                )
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Icon(
-                        Icons.Default.Badge, null,
-                        Modifier.size(12.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Text(
-                        "${passenger.documentLabel}: ${passenger.documentFull}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+// ─── Диалог редактирования пассажира ─────────────────────────────────────────
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PassengerEditDialog(passenger: Passenger, title: String, onDismiss: () -> Unit, onSave: (Passenger) -> Unit) {
+    var lastName by remember { mutableStateOf(passenger.lastName) }
+    var firstName by remember { mutableStateOf(passenger.firstName) }
+    var patronymic by remember { mutableStateOf(passenger.patronymic) }
+    var docType by remember { mutableStateOf(passenger.documentType) }
+    var docSeries by remember { mutableStateOf(passenger.documentSeries) }
+    var docNumber by remember { mutableStateOf(passenger.documentNumber) }
+    var birthDate by remember { mutableStateOf(extractDateDigits(passenger.birthDate)) }
+    var gender by remember { mutableStateOf(passenger.gender) }
+    var docTypeExpanded by remember { mutableStateOf(false) }
+
+    val isValid = lastName.isNotBlank() && firstName.isNotBlank() && docNumber.isNotBlank()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(value = lastName, onValueChange = { lastName = it },
+                        label = { Text("Фамилия*") }, singleLine = true, modifier = Modifier.weight(1f))
+                    OutlinedTextField(value = firstName, onValueChange = { firstName = it },
+                        label = { Text("Имя*") }, singleLine = true, modifier = Modifier.weight(1f))
                 }
-                if (passenger.birthDate.isNotEmpty()) {
-                    Text(
-                        passenger.birthDate,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                OutlinedTextField(value = patronymic, onValueChange = { patronymic = it },
+                    label = { Text("Отчество") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+
+                ExposedDropdownMenuBox(expanded = docTypeExpanded, onExpandedChange = { docTypeExpanded = it }) {
+                    OutlinedTextField(
+                        value = when (docType) { "foreign_passport" -> "Загранпаспорт"; "birth_cert" -> "Свидетельство"; else -> "Паспорт РФ" },
+                        onValueChange = {}, readOnly = true,
+                        label = { Text("Документ") },
+                        modifier = Modifier.fillMaxWidth().menuAnchor(),
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(docTypeExpanded) }
                     )
+                    ExposedDropdownMenu(expanded = docTypeExpanded, onDismissRequest = { docTypeExpanded = false }) {
+                        listOf("passport" to "Паспорт РФ", "foreign_passport" to "Загранпаспорт", "birth_cert" to "Свидетельство").forEach { (v, l) ->
+                            DropdownMenuItem(text = { Text(l) }, onClick = { docType = v; docTypeExpanded = false })
+                        }
+                    }
+                }
+
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(value = docSeries, onValueChange = { if (it.all { c -> c.isDigit() } && it.length <= 4) docSeries = it },
+                        label = { Text("Серия") }, singleLine = true, modifier = Modifier.weight(1f),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                    OutlinedTextField(value = docNumber, onValueChange = { if (it.all { c -> c.isDigit() } && it.length <= 6) docNumber = it },
+                        label = { Text("Номер*") }, singleLine = true, modifier = Modifier.weight(1.5f),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
+                }
+
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = birthDate,
+                        onValueChange = { birthDate = extractDateDigits(it) },
+                        label = { Text("Дата рождения") }, singleLine = true, modifier = Modifier.weight(1f),
+                        placeholder = { Text("дд.мм.гггг") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        visualTransformation = DateVisualTransformation
+                    )
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Пол", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            FilterChip(selected = gender == "male", onClick = { gender = "male" }, label = { Text("М") })
+                            FilterChip(selected = gender == "female", onClick = { gender = "female" }, label = { Text("Ж") })
+                        }
+                    }
                 }
             }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    onSave(passenger.copy(lastName = lastName.trim(), firstName = firstName.trim(),
+                        patronymic = patronymic.trim(), documentType = docType,
+                        documentSeries = docSeries.trim(), documentNumber = docNumber.trim(),
+                        birthDate = fmtDate(birthDate), gender = gender))
+                },
+                enabled = isValid
+            ) { Text("Сохранить") }
+        },
+        dismissButton = { OutlinedButton(onClick = onDismiss) { Text("Отмена") } }
+    )
+}
 
-            IconButton(onClick = { showDeleteConfirm = true }, modifier = Modifier.size(36.dp)) {
-                Icon(
-                    Icons.Default.Delete, null,
-                    Modifier.size(18.dp),
-                    tint = MaterialTheme.colorScheme.error.copy(alpha = 0.7f)
-                )
+// ─── Способ оплаты ───────────────────────────────────────────────────────────
+
+@Composable
+private fun PaymentCard(cards: List<PaymentCard>, onAdd: () -> Unit, onRemove: (PaymentCard) -> Unit) {
+    ProfileCard(title = "Способ оплаты", icon = Icons.Default.CreditCard) {
+        if (cards.isEmpty()) {
+            Column(
+                Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(Icons.Default.CreditCardOff, null, Modifier.size(40.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f))
+                Text("Нет привязанных карт",
+                    style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                OutlinedButton(onClick = onAdd) {
+                    Icon(Icons.Default.Add, null, Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Добавить карту")
+                }
+            }
+        } else {
+            cards.forEach { card -> PaymentCardItem(card = card, onRemove = { onRemove(card) }) }
+            Spacer(Modifier.height(4.dp))
+            OutlinedButton(onClick = onAdd, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Default.Add, null, Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Добавить карту")
             }
         }
     }
 }
 
-// ─── ВКЛАДКА: НАСТРОЙКИ ──────────────────────────────────────────────────────
-
 @Composable
-private fun SettingsTab(state: ProfileUiState, viewModel: ProfileViewModel) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+private fun PaymentCardItem(card: PaymentCard, onRemove: () -> Unit) {
+    val typeColor = when (card.type) {
+        "mastercard" -> MaterialTheme.colorScheme.tertiary
+        "mir" -> MaterialTheme.colorScheme.secondary
+        else -> MaterialTheme.colorScheme.primary
+    }
+    Surface(
+        modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+        tonalElevation = 1.dp
     ) {
-        // Appearance
-        SettingsGroupCard(title = "Внешний вид", icon = Icons.Default.Palette) {
-            SettingsToggleRow(
-                icon = if (state.settings.isDarkTheme) Icons.Default.DarkMode else Icons.Default.LightMode,
-                title = "Тёмная тема",
-                subtitle = if (state.settings.isDarkTheme) "Включена" else "Выключена",
-                checked = state.settings.isDarkTheme,
-                onToggle = viewModel::toggleDarkTheme
-            )
-        }
-
-        // System
-        SettingsGroupCard(title = "Система", icon = Icons.Default.Tune) {
-            SettingsToggleRow(
-                icon = Icons.Default.Notifications,
-                title = "Уведомления",
-                subtitle = if (state.settings.notificationsEnabled) "Включены" else "Выключены",
-                checked = state.settings.notificationsEnabled,
-                onToggle = viewModel::toggleNotifications
-            )
-        }
-
-        // Data
-        SettingsGroupCard(title = "Данные и хранилище", icon = Icons.Default.Storage) {
-            SettingsClickRow(
-                icon = Icons.Default.DeleteSweep,
-                title = "Очистить кэш",
-                subtitle = "Маршруты и билеты из локального хранилища",
-                onClick = viewModel::confirmClearCache
-            )
-            if (state.cacheCleared) {
-                Text(
-                    "✓ Кэш очищен",
-                    color = MaterialTheme.colorScheme.primary,
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.padding(start = 16.dp, bottom = 4.dp)
-                )
-                LaunchedEffect(Unit) { viewModel.resetCacheClearedState() }
+        Row(
+            modifier = Modifier.padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Box(
+                Modifier.size(44.dp).clip(RoundedCornerShape(10.dp)).background(typeColor.copy(alpha = 0.15f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Default.CreditCard, null, tint = typeColor, modifier = Modifier.size(24.dp))
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(card.type.uppercase(), style = MaterialTheme.typography.labelSmall,
+                    color = typeColor, fontWeight = FontWeight.SemiBold)
+                Text("•••• •••• •••• ${card.last4}", style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.Medium)
+                Text("до ${card.expiry}", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            IconButton(onClick = onRemove, modifier = Modifier.size(32.dp)) {
+                Icon(Icons.Default.Close, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-
-        // Support
-        SettingsGroupCard(title = "Поддержка", icon = Icons.Default.HelpOutline) {
-            SectionInfoRow(
-                icon = Icons.Default.HelpOutline,
-                title = "Поддержка и ЧаВо",
-                subtitle = "support@transport.app"
-            )
-            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
-            SectionInfoRow(
-                icon = Icons.Default.Info,
-                title = "О приложении",
-                subtitle = "Версия 1.0 • Transport Tickets"
-            )
-        }
-
-        Spacer(Modifier.height(16.dp))
     }
 }
 
+// ─── Диалог добавления карты ──────────────────────────────────────────────────
+
 @Composable
-private fun SettingsGroupCard(
+private fun AddCardDialog(onDismiss: () -> Unit, onAdd: (PaymentCard) -> Unit) {
+    var last4 by remember { mutableStateOf("") }
+    var expiry by remember { mutableStateOf("") }
+    var type by remember { mutableStateOf("visa") }
+    val isValid = last4.length == 4 && expiry.length == 5
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Добавить карту") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = last4,
+                    onValueChange = { if (it.all { c -> c.isDigit() } && it.length <= 4) last4 = it },
+                    label = { Text("Последние 4 цифры") },
+                    singleLine = true, modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    leadingIcon = { Icon(Icons.Default.CreditCard, null, Modifier.size(18.dp)) }
+                )
+                OutlinedTextField(
+                    value = expiry,
+                    onValueChange = { input ->
+                        val d = input.filter { it.isDigit() }.take(4)
+                        expiry = if (d.length >= 2) "${d.take(2)}/${d.drop(2)}" else d
+                    },
+                    label = { Text("Срок действия") },
+                    placeholder = { Text("ММ/ГГ") },
+                    singleLine = true, modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    leadingIcon = { Icon(Icons.Default.DateRange, null, Modifier.size(18.dp)) }
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("visa" to "Visa", "mastercard" to "Mastercard", "mir" to "Мир").forEach { (v, l) ->
+                        FilterChip(selected = type == v, onClick = { type = v }, label = { Text(l) })
+                    }
+                }
+            }
+        },
+        confirmButton = { Button(onClick = { onAdd(PaymentCard(last4, expiry, type)) }, enabled = isValid) { Text("Добавить") } },
+        dismissButton = { OutlinedButton(onClick = onDismiss) { Text("Отмена") } }
+    )
+}
+
+// ─── Настройки ───────────────────────────────────────────────────────────────
+
+@Composable
+private fun SettingsCard(state: ProfileUiState, viewModel: ProfileViewModel) {
+    ProfileCard(title = "Настройки", icon = Icons.Default.Settings) {
+        SwitchRow(
+            icon = if (state.settings.isDarkTheme) Icons.Default.DarkMode else Icons.Default.LightMode,
+            title = "Тёмная тема",
+            checked = state.settings.isDarkTheme,
+            onToggle = viewModel::toggleDarkTheme
+        )
+        HorizontalDivider()
+        SwitchRow(
+            icon = Icons.Default.Notifications,
+            title = "Уведомления",
+            checked = state.settings.notificationsEnabled,
+            onToggle = viewModel::toggleNotifications
+        )
+        HorizontalDivider()
+        ActionRow(
+            icon = Icons.Default.DeleteSweep,
+            title = "Очистить кэш",
+            subtitle = "Маршруты и билеты из памяти",
+            onClick = viewModel::confirmClearCache
+        )
+    }
+}
+
+// ─── Аккаунт ─────────────────────────────────────────────────────────────────
+
+@Composable
+private fun AccountCard(state: ProfileUiState, viewModel: ProfileViewModel, onSignOut: () -> Unit) {
+    ProfileCard(title = "Аккаунт", icon = Icons.Default.ManageAccounts) {
+        ActionRow(
+            icon = Icons.Default.Info,
+            title = "О приложении",
+            subtitle = "Transport Tickets · Версия 1.0"
+        )
+        HorizontalDivider()
+        Row(
+            modifier = Modifier.fillMaxWidth().clickable(onClick = onSignOut).padding(vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Icon(Icons.Default.Logout, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.error)
+            Text("Выйти из аккаунта", style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Medium)
+        }
+    }
+}
+
+// ─── Переиспользуемые компоненты ──────────────────────────────────────────────
+
+@Composable
+private fun ProfileCard(
     title: String,
     icon: ImageVector,
+    action: (@Composable () -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit
 ) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column {
+    Card(modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(0.dp)) {
             Row(
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Icon(icon, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
-                Text(
-                    title,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.primary
-                )
+                Spacer(Modifier.width(8.dp))
+                Text(title, style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.weight(1f))
+                action?.invoke()
             }
             HorizontalDivider()
+            Spacer(Modifier.height(6.dp))
             content()
         }
     }
 }
 
 @Composable
-private fun SettingsToggleRow(
-    icon: ImageVector,
-    title: String,
-    subtitle: String,
-    checked: Boolean,
-    onToggle: () -> Unit
-) {
+private fun SwitchRow(icon: ImageVector, title: String, checked: Boolean, onToggle: () -> Unit) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically
+        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Icon(icon, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.width(16.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
+        Icon(icon, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(title, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
         Switch(checked = checked, onCheckedChange = { onToggle() })
     }
 }
 
 @Composable
-private fun SettingsClickRow(
+private fun ActionRow(
     icon: ImageVector,
     title: String,
-    subtitle: String,
-    onClick: () -> Unit
+    subtitle: String? = null,
+    loading: Boolean = false,
+    onClick: () -> Unit = {}
 ) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick, enabled = !loading).padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Icon(icon, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.width(16.dp))
-        Column(modifier = Modifier.weight(1f)) {
+        if (loading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+        else Icon(icon, null, Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
             Text(title, style = MaterialTheme.typography.bodyLarge)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (subtitle != null)
+                Text(subtitle, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
         }
         Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
-
-@Composable
-private fun SectionInfoRow(icon: ImageVector, title: String, subtitle: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(icon, null, Modifier.size(22.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.width(16.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.bodyLarge)
-            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-    }
-}
-
-// ─── QR ДИАЛОГ ───────────────────────────────────────────────────────────────
-
-@Composable
-private fun QrDialog(ticket: Ticket, onDismiss: () -> Unit) {
-    val content = "ticket:${ticket.id}:route:${ticket.routeId}:seats:${ticket.seatNumbers.joinToString(",")}"
-    val qrBitmap = remember(ticket.id) { generateQrBitmap(content) }
-
-    Dialog(onDismissRequest = onDismiss) {
-        Card(shape = RoundedCornerShape(16.dp)) {
-            Column(
-                modifier = Modifier.padding(24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                Text("Электронный билет", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-
-                if (qrBitmap != null) {
-                    Image(
-                        bitmap = qrBitmap.asImageBitmap(),
-                        contentDescription = "QR код билета",
-                        modifier = Modifier.size(220.dp).clip(RoundedCornerShape(8.dp))
-                    )
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .size(220.dp)
-                            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(Icons.Default.QrCode, null, Modifier.size(120.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Text("Билет #${ticket.id}", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    ticket.route?.let {
-                        Text(
-                            "${it.originCity} → ${it.destinationCity}",
-                            style = MaterialTheme.typography.bodyMedium,
-                            textAlign = TextAlign.Center
-                        )
-                    }
-                    if (ticket.seatNumbers.isNotEmpty()) {
-                        Text(
-                            "Места: ${ticket.seatNumbers.sorted().joinToString(", ")}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Medium
-                        )
-                    }
-                }
-
-                TextButton(onClick = onDismiss, modifier = Modifier.fillMaxWidth()) { Text("Закрыть") }
-            }
-        }
-    }
-}
-
-private fun generateQrBitmap(content: String): Bitmap? = runCatching {
-    val hints = mapOf(EncodeHintType.MARGIN to 1)
-    val bitMatrix = QRCodeWriter().encode(content, BarcodeFormat.QR_CODE, 512, 512, hints)
-    val bmp = Bitmap.createBitmap(512, 512, Bitmap.Config.RGB_565)
-    for (x in 0 until 512) {
-        for (y in 0 until 512) {
-            bmp.setPixel(x, y, if (bitMatrix[x, y]) 0xFF000000.toInt() else 0xFFFFFFFF.toInt())
-        }
-    }
-    bmp
-}.getOrNull()

@@ -1,6 +1,5 @@
 package com.transport.tickets.data.repository
 
-import com.google.firebase.auth.FirebaseAuth
 import com.transport.tickets.data.local.database.dao.UserProfileDao
 import com.transport.tickets.data.local.database.entities.UserProfileEntity
 import com.transport.tickets.data.preferences.AppPreferences
@@ -14,19 +13,25 @@ import javax.inject.Inject
 
 class UserRepositoryImpl @Inject constructor(
     private val dao: UserProfileDao,
-    private val prefs: AppPreferences,
-    private val firebaseAuth: FirebaseAuth
+    private val prefs: AppPreferences
 ) : UserRepository {
 
-    override fun getProfile(): Flow<UserProfile?> = dao.getProfile().map { entity ->
-        val user = firebaseAuth.currentUser ?: return@map null
+    override fun getProfile(): Flow<UserProfile?> = combine(
+        prefs.userEmail,
+        prefs.userId,
+        prefs.userCreatedAt,
+        dao.getProfile()
+    ) { email, userId, createdAt, entity ->
+        if (email.isEmpty()) return@combine null
         UserProfile(
-            uid = user.uid,
-            email = user.email ?: "",
-            displayName = entity?.displayName ?: user.displayName ?: "",
+            uid = userId.toString(),
+            email = email,
+            displayName = entity?.displayName ?: "",
             phone = entity?.phone ?: "",
             birthDate = entity?.birthDate ?: "",
-            registeredAt = user.metadata?.creationTimestamp ?: 0L
+            registeredAt = runCatching {
+                java.time.Instant.parse(createdAt).toEpochMilli()
+            }.getOrDefault(0L)
         )
     }
 

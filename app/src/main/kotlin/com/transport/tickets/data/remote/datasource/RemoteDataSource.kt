@@ -7,8 +7,11 @@ import javax.inject.Inject
 class RemoteDataSource @Inject constructor(
     private val api: TransportApi
 ) {
-    suspend fun verifyToken(idToken: String): VerifyTokenResponse =
-        api.verifyToken(VerifyTokenRequest(idToken))
+    suspend fun register(email: String, password: String): AuthResponse =
+        api.register(RegisterRequest(email, password))
+
+    suspend fun login(email: String, password: String): AuthResponse =
+        api.login(LoginRequest(email, password))
 
     suspend fun getRoutes(
         origin: String?,

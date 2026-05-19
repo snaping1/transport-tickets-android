@@ -9,8 +9,13 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.transport.tickets.data.repository.toDomain
 import com.transport.tickets.domain.model.Route
-import com.transport.tickets.presentation.auth.AuthScreen
+import com.transport.tickets.presentation.admin.AdminAddRouteScreen
+import com.transport.tickets.presentation.admin.AdminLoginScreen
+import com.transport.tickets.presentation.admin.AdminPanelScreen
 import com.transport.tickets.presentation.auth.AuthViewModel
+import com.transport.tickets.presentation.auth.LoginScreen
+import com.transport.tickets.presentation.auth.RegisterScreen
+import com.transport.tickets.presentation.main.MainScreen
 import com.transport.tickets.presentation.profile.ProfileScreen
 import com.transport.tickets.presentation.purchase.PassengerInputScreen
 import com.transport.tickets.presentation.purchase.PaymentScreen
@@ -21,7 +26,8 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 sealed class Screen(val route: String) {
-    data object Auth : Screen("auth")
+    data object Login : Screen("login")
+    data object Register : Screen("register")
     data object Routes : Screen("routes")
     data object Purchase : Screen("purchase/{routeJson}") {
         fun createRoute(route: Route): String {
@@ -50,7 +56,11 @@ sealed class Screen(val route: String) {
     data object TicketDetail : Screen("ticket_detail/{ticketId}") {
         fun createRoute(ticketId: Int) = "ticket_detail/$ticketId"
     }
+    data object Main : Screen("main")
     data object Profile : Screen("profile")
+    data object AdminLogin : Screen("admin_login")
+    data object AdminPanel : Screen("admin_panel")
+    data object AdminAddRoute : Screen("admin_add_route")
 }
 
 @Composable
@@ -58,18 +68,76 @@ fun AppNavigation(
     authViewModel: AuthViewModel,
     navController: NavHostController = rememberNavController()
 ) {
-    val startDestination = if (authViewModel.isLoggedIn) Screen.Routes.route else Screen.Auth.route
+    val startDestination = if (authViewModel.isLoggedIn) Screen.Main.route else Screen.Login.route
 
     NavHost(navController = navController, startDestination = startDestination) {
 
-        composable(Screen.Auth.route) {
-            AuthScreen(
-                onAuthSuccess = {
-                    navController.navigate(Screen.Routes.route) {
-                        popUpTo(Screen.Auth.route) { inclusive = true }
+        composable(Screen.Login.route) {
+            LoginScreen(
+                onLoginSuccess = {
+                    navController.navigate(Screen.Main.route) {
+                        popUpTo(Screen.Login.route) { inclusive = true }
                     }
                 },
+                onNavigateToRegister = {
+                    navController.navigate(Screen.Register.route)
+                },
+                onAdminClick = { navController.navigate(Screen.AdminLogin.route) },
                 viewModel = authViewModel
+            )
+        }
+
+        composable(Screen.Register.route) {
+            RegisterScreen(
+                onRegisterSuccess = {
+                    navController.navigate(Screen.Main.route) {
+                        popUpTo(Screen.Login.route) { inclusive = true }
+                    }
+                },
+                onNavigateToLogin = { navController.popBackStack() },
+                viewModel = authViewModel
+            )
+        }
+
+        composable(Screen.AdminLogin.route) {
+            AdminLoginScreen(
+                onLoginSuccess = {
+                    navController.navigate(Screen.AdminPanel.route) {
+                        popUpTo(Screen.AdminLogin.route) { inclusive = true }
+                    }
+                },
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable(Screen.AdminPanel.route) {
+            AdminPanelScreen(
+                onAddRoute = { navController.navigate(Screen.AdminAddRoute.route) },
+                onLogout = {
+                    navController.navigate(Screen.Login.route) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                }
+            )
+        }
+
+        composable(Screen.AdminAddRoute.route) {
+            AdminAddRouteScreen(
+                onSuccess = { navController.popBackStack() },
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable(Screen.Main.route) {
+            MainScreen(
+                onRouteClick = { route -> navController.navigate(Screen.Purchase.createRoute(route)) },
+                onTicketClick = { ticketId -> navController.navigate(Screen.TicketDetail.createRoute(ticketId)) },
+                onSignOut = {
+                    authViewModel.signOut()
+                    navController.navigate(Screen.Login.route) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                }
             )
         }
 
@@ -79,7 +147,7 @@ fun AppNavigation(
                 onProfileClick = { navController.navigate(Screen.Profile.route) },
                 onSignOut = {
                     authViewModel.signOut()
-                    navController.navigate(Screen.Auth.route) {
+                    navController.navigate(Screen.Login.route) {
                         popUpTo(0) { inclusive = true }
                     }
                 }
@@ -109,7 +177,7 @@ fun AppNavigation(
             PaymentScreen(
                 onPaymentSuccess = { ticketId ->
                     navController.navigate(Screen.TicketDetail.createRoute(ticketId)) {
-                        popUpTo(Screen.Routes.route)
+                        popUpTo(Screen.Main.route)
                     }
                 },
                 onBack = { navController.popBackStack() }
@@ -129,7 +197,7 @@ fun AppNavigation(
             ProfileScreen(
                 onSignOut = {
                     authViewModel.signOut()
-                    navController.navigate(Screen.Auth.route) {
+                    navController.navigate(Screen.Login.route) {
                         popUpTo(0) { inclusive = true }
                     }
                 },

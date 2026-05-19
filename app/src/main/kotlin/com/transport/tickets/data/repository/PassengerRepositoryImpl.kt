@@ -35,7 +35,7 @@ class PassengerRepositoryImpl @Inject constructor(
             passenger.documentNumber
         )
         val entity = passenger.toEntity().copy(
-            id = existing?.id ?: 0,
+            id = existing?.id ?: passenger.id,
             isSaved = true
         )
         return dao.upsert(entity).toInt()

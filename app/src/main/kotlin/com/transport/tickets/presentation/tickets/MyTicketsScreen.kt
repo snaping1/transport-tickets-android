@@ -22,6 +22,9 @@ import java.time.format.DateTimeFormatter
 @Composable
 fun MyTicketsScreen(
     onBack: () -> Unit,
+    showBackButton: Boolean = true,
+    onTicketClick: (Int) -> Unit = {},
+    onNavigateToSearch: () -> Unit = {},
     viewModel: MyTicketsViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -51,8 +54,10 @@ fun MyTicketsScreen(
             TopAppBar(
                 title = { Text("Мои билеты") },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Назад")
+                    if (showBackButton) {
+                        IconButton(onClick = onBack) {
+                            Icon(Icons.Default.ArrowBack, contentDescription = "Назад")
+                        }
                     }
                 },
                 actions = {
@@ -89,15 +94,25 @@ fun MyTicketsScreen(
                 }
             } else if (uiState.tickets.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         Icon(
                             Icons.Default.ConfirmationNumber,
                             contentDescription = null,
                             modifier = Modifier.size(64.dp),
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
                         )
-                        Spacer(modifier = Modifier.height(16.dp))
+                        Spacer(modifier = Modifier.height(8.dp))
                         Text("У вас пока нет билетов", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            "Найдите маршрут и купите первый билет",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(onClick = onNavigateToSearch) { Text("Найти маршрут") }
                     }
                 }
             } else {
@@ -109,7 +124,8 @@ fun MyTicketsScreen(
                         TicketCard(
                             ticket = ticket,
                             isCancelling = uiState.cancellingTicketId == ticket.id,
-                            onCancelClick = { ticketToCancel = ticket }
+                            onCancelClick = { ticketToCancel = ticket },
+                            onTicketClick = { onTicketClick(ticket.id) }
                         )
                     }
                 }
@@ -122,7 +138,8 @@ fun MyTicketsScreen(
 private fun TicketCard(
     ticket: Ticket,
     isCancelling: Boolean,
-    onCancelClick: () -> Unit
+    onCancelClick: () -> Unit,
+    onTicketClick: () -> Unit = {}
 ) {
     val fmt = DateTimeFormatter.ofPattern("dd MMM yyyy, HH:mm")
         .withZone(ZoneId.systemDefault())
@@ -130,6 +147,7 @@ private fun TicketCard(
     val isActive = ticket.status == "active"
 
     Card(
+        onClick = onTicketClick,
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
             containerColor = if (isActive) MaterialTheme.colorScheme.surface

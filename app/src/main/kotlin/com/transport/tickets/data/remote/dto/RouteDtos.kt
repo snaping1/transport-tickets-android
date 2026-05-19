@@ -34,13 +34,17 @@ data class TicketDto(
 )
 
 @Serializable
-data class VerifyTokenRequest(val idToken: String)
+data class LoginRequest(val email: String, val password: String)
 
 @Serializable
-data class VerifyTokenResponse(
+data class RegisterRequest(val email: String, val password: String)
+
+@Serializable
+data class AuthResponse(
+    val token: String,
     val userId: Int,
-    val firebaseUid: String,
-    val email: String
+    val email: String,
+    val createdAt: String
 )
 
 @Serializable

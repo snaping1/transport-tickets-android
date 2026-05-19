@@ -5,8 +5,11 @@ import retrofit2.http.*
 
 interface TransportApi {
 
-    @POST("auth/verify")
-    suspend fun verifyToken(@Body request: VerifyTokenRequest): VerifyTokenResponse
+    @POST("auth/register")
+    suspend fun register(@Body request: RegisterRequest): AuthResponse
+
+    @POST("auth/login")
+    suspend fun login(@Body request: LoginRequest): AuthResponse
 
     @GET("routes")
     suspend fun getRoutes(
