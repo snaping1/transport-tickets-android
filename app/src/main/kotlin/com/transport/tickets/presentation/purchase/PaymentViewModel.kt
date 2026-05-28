@@ -46,7 +46,7 @@ class PaymentViewModel @Inject constructor(
             _paymentState.value = PaymentUiState.Processing
             delay(1500)
             try {
-                val ticket = buyTicketUseCase(r.id, seats.size, seats)
+                val ticket = buyTicketUseCase(r.id, seats.size, seats, passengers)
                 if (passengers.isNotEmpty()) {
                     saveTicketPassengersUseCase(ticket.id, passengers)
                 }

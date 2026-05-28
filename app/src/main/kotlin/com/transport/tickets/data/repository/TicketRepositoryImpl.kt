@@ -2,6 +2,7 @@ package com.transport.tickets.data.repository
 
 import com.transport.tickets.data.local.datasource.LocalDataSource
 import com.transport.tickets.data.remote.datasource.RemoteDataSource
+import com.transport.tickets.domain.model.Passenger
 import com.transport.tickets.domain.model.Ticket
 import com.transport.tickets.domain.repository.TicketRepository
 import kotlinx.coroutines.flow.Flow
@@ -21,8 +22,8 @@ class TicketRepositoryImpl @Inject constructor(
         localDataSource.cacheTickets(dtos.map { it.toEntity() })
     }
 
-    override suspend fun buyTicket(routeId: Int, seatCount: Int, seatNumbers: List<Int>): Ticket {
-        val dto = remoteDataSource.buyTicket(routeId, seatCount, seatNumbers)
+    override suspend fun buyTicket(routeId: Int, seatCount: Int, seatNumbers: List<Int>, passengers: Map<Int, Passenger>): Ticket {
+        val dto = remoteDataSource.buyTicket(routeId, seatCount, seatNumbers, passengers)
         localDataSource.insertTicket(dto.toEntity())
         return dto.toDomain()
     }

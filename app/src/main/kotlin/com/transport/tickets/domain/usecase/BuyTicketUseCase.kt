@@ -1,5 +1,6 @@
 package com.transport.tickets.domain.usecase
 
+import com.transport.tickets.domain.model.Passenger
 import com.transport.tickets.domain.model.Ticket
 import com.transport.tickets.domain.repository.TicketRepository
 import javax.inject.Inject
@@ -7,9 +8,9 @@ import javax.inject.Inject
 class BuyTicketUseCase @Inject constructor(
     private val repository: TicketRepository
 ) {
-    suspend operator fun invoke(routeId: Int, seatCount: Int, seatNumbers: List<Int>): Ticket {
+    suspend operator fun invoke(routeId: Int, seatCount: Int, seatNumbers: List<Int>, passengers: Map<Int, Passenger> = emptyMap()): Ticket {
         require(seatCount in 1..10) { "Seat count must be between 1 and 10" }
-        return repository.buyTicket(routeId, seatCount, seatNumbers)
+        return repository.buyTicket(routeId, seatCount, seatNumbers, passengers)
     }
 
     suspend fun getOccupiedSeats(routeId: Int): List<Int> =
