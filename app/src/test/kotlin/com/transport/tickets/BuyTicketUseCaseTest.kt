@@ -1,6 +1,5 @@
 package com.transport.tickets
 
-import com.transport.tickets.domain.model.Route
 import com.transport.tickets.domain.model.Ticket
 import com.transport.tickets.domain.repository.TicketRepository
 import com.transport.tickets.domain.usecase.BuyTicketUseCase
@@ -37,42 +36,51 @@ class BuyTicketUseCaseTest {
 
     @Test
     fun `buy ticket succeeds with valid parameters`() = runTest {
-        coEvery { repository.buyTicket(1, 2) } returns fakeTicket
+        val seats = listOf(1, 2)
+        coEvery { repository.buyTicket(1, 2, seats) } returns fakeTicket
 
-        val result = useCase(routeId = 1, seatCount = 2)
+        val result = useCase(routeId = 1, seatCount = 2, seatNumbers = seats)
 
         assertEquals(fakeTicket, result)
-        coVerify(exactly = 1) { repository.buyTicket(1, 2) }
+        coVerify(exactly = 1) { repository.buyTicket(1, 2, seats) }
     }
 
     @Test
     fun `buy ticket fails with zero seat count`() = runTest {
         assertThrows(IllegalArgumentException::class.java) {
-            kotlinx.coroutines.runBlocking { useCase(routeId = 1, seatCount = 0) }
+            kotlinx.coroutines.runBlocking {
+                useCase(routeId = 1, seatCount = 0, seatNumbers = emptyList())
+            }
         }
     }
 
     @Test
     fun `buy ticket fails with more than 10 seats`() = runTest {
         assertThrows(IllegalArgumentException::class.java) {
-            kotlinx.coroutines.runBlocking { useCase(routeId = 1, seatCount = 11) }
+            kotlinx.coroutines.runBlocking {
+                useCase(routeId = 1, seatCount = 11, seatNumbers = (1..11).toList())
+            }
         }
     }
 
     @Test
     fun `buy ticket propagates repository exception`() = runTest {
-        coEvery { repository.buyTicket(1, 1) } throws IllegalStateException("Not enough seats")
+        val seats = listOf(1)
+        coEvery { repository.buyTicket(1, 1, seats) } throws IllegalStateException("Not enough seats")
 
         assertThrows(IllegalStateException::class.java) {
-            kotlinx.coroutines.runBlocking { useCase(routeId = 1, seatCount = 1) }
+            kotlinx.coroutines.runBlocking {
+                useCase(routeId = 1, seatCount = 1, seatNumbers = seats)
+            }
         }
     }
 
     @Test
     fun `buy ticket with max seats succeeds`() = runTest {
-        coEvery { repository.buyTicket(1, 10) } returns fakeTicket.copy(seatCount = 10, totalPrice = 15000.0)
+        val seats = (1..10).toList()
+        coEvery { repository.buyTicket(1, 10, seats) } returns fakeTicket.copy(seatCount = 10, totalPrice = 15000.0)
 
-        val result = useCase(routeId = 1, seatCount = 10)
+        val result = useCase(routeId = 1, seatCount = 10, seatNumbers = seats)
 
         assertEquals(10, result.seatCount)
     }

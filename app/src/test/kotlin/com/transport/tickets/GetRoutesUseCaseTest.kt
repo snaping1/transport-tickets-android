@@ -72,11 +72,11 @@ class GetRoutesUseCaseTest {
 
     @Test
     fun `refresh calls repository refresh`() = runTest {
-        coEvery { repository.refreshRoutes(any(), any(), any()) } returns Unit
+        coEvery { repository.refreshRoutes(any(), any(), any(), any()) } returns Unit
 
         useCase.refresh(origin = "Москва")
 
-        coVerify { repository.refreshRoutes("Москва", null, null) }
+        coVerify { repository.refreshRoutes("Москва", null, null, null) }
     }
 
     @Test
